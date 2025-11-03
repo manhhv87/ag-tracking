@@ -4,20 +4,31 @@ channels:
 dependencies:
   - python=3.10.11
   - pip
-  - numpy=1.26.*
+  - numpy=1.26.*          # GIỮ NumPy 1.x để tương thích torch 1.13.x
   - scipy=1.10.1
   - pillow=9.4.0
   - tabulate=0.9.0
+  - matplotlib>=3.7,<3.9
+  - pandas=2.1.*          # motmetrics yêu cầu pandas
+  # (tùy chọn) có thể thêm: pyyaml=6.0  -> nếu muốn dùng bản conda
 
   - pip:
-      # PyTorch 1.13.1 + CUDA 11.7 wheels
+      # Giữ ràng buộc này để pip KHÔNG nâng NumPy lên 2.x
+      - "numpy<2.0"
+
+      # PyTorch 1.13.1 + CUDA 11.7 (wheels chính chủ)
       - --extra-index-url https://download.pytorch.org/whl/cu117
       - torch==1.13.1
       - torchvision==0.14.1
       - torchaudio==0.13.1
 
-      # Other package (pip)
+      # Gói dự án
       - kornia==0.6.10
       - opencv-python==4.7.0.72
       - PyYAML==6.0
       - ultralytics==8.2.6
+
+      # Đánh giá MOT / Tracking
+      - motmetrics>=1.4.0
+      - lapx>=0.5.6
+      - trackeval

@@ -1,6 +1,9 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
+# Precomputed per-sequence metrics for 4 trackers on (presumably) 8 sequences.
+# Keys inside each tracker dictionary are metric names, each mapping to a list
+# of per-sequence values. These are used for quick aggregation (mean ± std).
 metrics = {
     "Tracktor": {
         "MOTA_values": [93.006, 93.051, 95.622, 94.777, 93.825, 92.863, 93.811, 94.597],
@@ -29,46 +32,86 @@ metrics = {
 }
 
 
-def plot_metric(
-    t, data, metric, title, xlabel, ylabel, fontsize=20
-):  # data includes ordenated, style and label
-    for dat in data:
-        plt.plot(t, dat[0], dat[1], label=dat[2])
+def plot_metric(t, data, metric, title, xlabel, ylabel, fontsize=20):
+    """
+    Plot one metric against a parameter grid with multiple series overlaid.
+
+    This function draws line plots for the provided series, sharing the same x-grid,
+    and applies consistent labels, title, legend, and axes formatting. It is intended
+    to be used inside pre-configured subplots (i.e., caller handles plt.subplot).
+
+    Args:
+        t (array-like): 1D array of x-values (e.g., thresholds: [0.0, 0.2, ..., 1.0]).
+        data (list[list]): Each element is [y_values, style, label], where:
+            - y_values (array-like): 1D values for the metric to be plotted vs t.
+            - style (str): Matplotlib line/marker style (e.g., "s-", "*-g", ".-r").
+            - label (str): Legend label for this series (LaTeX ok, e.g., "$\\lambda_{nms}$").
+        metric (str): Metric name (not used inside, kept for readability when calling).
+        title (str): Title for the subplot.
+        xlabel (str): Label for the x-axis (can include LaTeX math).
+        ylabel (str): Label for the y-axis.
+        fontsize (int, optional): Base font size for labels/ticks/title. Defaults to 20.
+
+    Effects:
+        - Plots each series as a line on the current axes.
+        - Sets labels, title, legend, grid, and y-limits to [-5, 105].
+
+    Notes:
+        - y-limits assume metric values are percentages (0–100). The buffer (-5, 105)
+          avoids clipping markers at extremes.
+        - Caller should invoke plt.tight_layout() and plt.savefig(...) as appropriate.
+    """
+    for dat in data:    
+        plt.plot(t, dat[0], dat[1], label=dat[2])   # plot y vs. t with given style and label
     plt.xlabel(xlabel, fontsize=fontsize)
     plt.ylabel(ylabel, fontsize=fontsize * 0.8)
     plt.xticks(fontsize=fontsize * 0.8)
     plt.yticks(fontsize=fontsize * 0.8)
-    plt.ylim(-5, 105)
+    plt.ylim(-5, 105)   # fixed y-range for percentage-like metrics
     plt.legend(fontsize=fontsize * 0.8)
     plt.title(title, fontsize=fontsize)
-    plt.grid()
+    plt.grid()  # add background grid for readability
 
 
 if __name__ == "__main__":
-    # First part
+    # ---------------------------
+    # First part: summary stats
+    # ---------------------------
+    # For each tracker and metric list, compute mean ± std across sequences and print.
     for k, v in metrics.items():
         for metric, values in v.items():
-            vals = np.array(values)
+            vals = np.array(values)     # convert to ndarray for numeric ops
             print(f"{k} {metric} {vals.mean():.3f} +- {vals.std():.3f}")
 
-    # Second part
+    # ---------------------------
+    # Second part: parameter sweeps
+    # ---------------------------
+    # Parameter grid (shared x-axis):
+    #   t = [0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0]
+    # Interpreted as candidate thresholds for NMS, detection, and regression gating.
     t = np.array([0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0])
 
+    # NMS threshold (λ_nms) curves for HOTA/MOTA/IDF1
     hota_nms = np.array([87.719, 91.978, 90.272, 90.778, 91.322, 87.463, 21.741])
     mota_nms = np.array([97.845, 97.736, 97.318, 97.459, 97.655, 97.611, 0.000])
     idf1_nms = np.array([86.530, 88.818, 84.410, 86.579, 86.877, 85.204, 19.677])
 
+    # Detection score threshold (s_new) curves
     hota_dth = np.array([66.048, 88.406, 89.509, 91.978, 87.859, 86.135, 0])
     mota_dth = np.array([81.172, 97.305, 97.434, 97.736, 97.298, 97.374, 0])
     idf1_dth = np.array([73.149, 85.777, 86.403, 88.818, 86.390, 83.888, 0])
 
+    # Regression/association threshold (s_active) curves
     hota_rth = np.array([67.546, 87.362, 89.234, 91.978, 88.508, 87.047, 0])
     mota_rth = np.array([81.545, 97.414, 97.051, 97.736, 96.017, 95.607, 0])
     idf1_rth = np.array([74.297, 86.454, 86.161, 88.818, 86.097, 85.155, 0])
 
-    # By metric
+    # ---------------------------
+    # Views "by metric": three subplots, each shows one metric vs. all parameters
+    # ---------------------------
     plt.figure(figsize=(13, 4))
 
+    # MOTA vs. (λ_nms, s_new, s_active)
     plt.subplot(1, 3, 1)
     plot_metric(
         t,
@@ -82,6 +125,8 @@ if __name__ == "__main__":
         "Parameter",
         "MOTA",
     )
+
+    # HOTA vs. (λ_nms, s_new, s_active)
     plt.subplot(1, 3, 2)
     plot_metric(
         t,
@@ -95,6 +140,8 @@ if __name__ == "__main__":
         "Parameter",
         "HOTA",
     )
+
+    # IDF1 vs. (λ_nms, s_new, s_active)
     plt.subplot(1, 3, 3)
     plot_metric(
         t,
@@ -113,7 +160,9 @@ if __name__ == "__main__":
     plt.savefig("output/LettuceMOT/parameters/parameter_by_metric.jpg")
     plt.savefig("output/LettuceMOT/parameters/parameter_by_metric.eps")
 
-    # By parameter
+    # ---------------------------
+    # Views "by parameter": three subplots, each shows all metrics vs. one parameter
+    # ---------------------------
     plt.figure(figsize=(13, 4))
 
     plt.subplot(1, 3, 1)
@@ -125,6 +174,8 @@ if __name__ == "__main__":
         "$\lambda_{nms}$",
         "Metric",
     )
+
+    # s_new: compare MOTA/HOTA/IDF1 curves
     plt.subplot(1, 3, 2)
     plot_metric(
         t,
@@ -134,6 +185,8 @@ if __name__ == "__main__":
         "$s_{new}$",
         "Metric",
     )
+
+    # s_active: compare MOTA/HOTA/IDF1 curves
     plt.subplot(1, 3, 3)
     plot_metric(
         t,
@@ -147,9 +200,12 @@ if __name__ == "__main__":
     plt.savefig("output/LettuceMOT/parameters/metric_by_parameter.jpg")
     plt.savefig("output/LettuceMOT/parameters/metric_by_parameter.eps")
 
-    # Without grouping
+    # ---------------------------
+    # Full grid (3×3): each subplot is a single (metric, parameter) pairing
+    # ---------------------------
     plt.figure(figsize=(13, 10))
 
+    # Row 1: MOTA vs. each parameter (λ_nms, s_new, s_active)
     plt.subplot(3, 3, 1)
     plot_metric(
         t,
@@ -177,6 +233,8 @@ if __name__ == "__main__":
         "$s_{active}$",
         "",
     )
+
+    # Row 2: HOTA vs. each parameter
     plt.subplot(3, 3, 4)
     plot_metric(
         t,
@@ -204,6 +262,8 @@ if __name__ == "__main__":
         "$s_{active}$",
         "",
     )
+
+    # Row 3: IDF1 vs. each parameter
     plt.subplot(3, 3, 7)
     plot_metric(
         t,
@@ -234,4 +294,4 @@ if __name__ == "__main__":
     plt.tight_layout()
     plt.savefig("output/LettuceMOT/parameters/all.jpg")
     plt.savefig("output/LettuceMOT/parameters/all.eps")
-    plt.show()
+    plt.show()  # display figures interactively (blocks until windows are closed)
