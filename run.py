@@ -76,7 +76,7 @@ if __name__ == "__main__":
         # For Apple, adjust paths to MOT directory layout.
         cfg["datadir"] += "MOT/"
         cfg["outdir"] += "MOT/"
-        
+
     print("Collection:", benchmark)
 
     # ---------------------------------------------------
@@ -101,7 +101,7 @@ if __name__ == "__main__":
     inp = input("continue? (y/N): ")
     if inp.lower() != "y":
         exit()
-    
+
     # --------------------------------------------
     # 4) Build datasets and dataloaders per set
     # --------------------------------------------
@@ -119,7 +119,7 @@ if __name__ == "__main__":
                 num_workers=cfg["num_workers"],
             )
         )
-    
+
     # --------------------------------------------
     # 5) Dispatch to the selected pipeline (task)
     # --------------------------------------------
@@ -129,14 +129,14 @@ if __name__ == "__main__":
         for dataloader, name in zip(dataloaders, cfg["sets"]):
             print("\n" * 2 + "dataset:", name)
             play(cfg, dataloader, name)
-    
+
     # ---- Detection (train/eval/predict) ----
     if cfg["task"] == "det":
         # Special-case: YOLOv8 + Apple -> use COCO directory layout instead of MOT.
         if cfg["detector"] == "yolov8" and "apple" in args.dataset.lower():
             cfg["datadir"] = cfg["datadir"].replace("/MOT/", "/COCO/")
             cfg["outdir"] = cfg["outdir"].replace("/MOT/", "/COCO/")
-        
+
         # Optionally merge multiple AgMOT datasets into a single training set.
         merged = MergedAgMOT(datasets)
 
@@ -147,7 +147,7 @@ if __name__ == "__main__":
             trainer = UltraTrainer(cfg)
         else:
             raise ValueError("Invalid detector")
-        
+
         # Execute the requested mode for detection.
         if cfg["mode"] == "train":
             trainer.train()
@@ -155,7 +155,7 @@ if __name__ == "__main__":
             trainer.eval()
         if cfg["mode"] == "predict":
             trainer.predict()
-    
+
     # ---- SLAM processing ----
     if cfg["task"] == "slam":
         for dataloader, name in zip(dataloaders, cfg["sets"]):
@@ -163,7 +163,7 @@ if __name__ == "__main__":
             # Ensure the output directory exists for SLAM artifacts.
             os.makedirs(cfg["outdir"] + "slam", exist_ok=True)
             slam(cfg, dataloader, name)
-    
+
     # ---- Tracking (evaluation or prediction) ----
     if cfg["task"] == "track":
         if cfg["mode"] == "eval":
@@ -175,7 +175,7 @@ if __name__ == "__main__":
                 raise ValueError(
                     "ByteTrack tracker is not yet available for LettuceMOT"
                 )
-            
+
             # For Apple datasets and ByteTrack, run the dedicated multi-seq driver.
             if cfg["tracker"] == "bytetrack" and "apple" in args.dataset.lower():
                 byte_track(cfg, datasets)
