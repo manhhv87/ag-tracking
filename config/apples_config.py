@@ -24,12 +24,12 @@ test_set = [seti for i, seti in enumerate(sets) if i in range(6, 12)]
 sets = test_set         # [seti for i, seti in enumerate(sets) if i in range(12)]
 
 ## General configs
-task = "track"          # 'play' 'det' 'slam' 'track'
-mode = "eval"           # 'train' 'eval' 'predict'
-dectector = "yolov8"    # 'frcnn' 'yolov8'
+task = "det"          # 'play' 'det' 'slam' 'track'
+mode = "train"           # 'train' 'eval' 'predict'
+dectector = "frcnn"    # 'frcnn' 'yolov8'
 
 # TODO: change to the tracker names as defined in the paper
-tracker = "bytetrack"   # 'clean' 'orig' 'ag'  'agt' 'bytetrack'
+tracker = "agt"   # 'clean' 'orig' 'ag'  'agt' 'bytetrack'
 device = 0              # 'cpu' cuda:int
 
 ## Det Train YOLO Configs
@@ -38,9 +38,10 @@ yolo_data = "config/apples_coco.yaml"
 
 ## Det Train FasterRCNN Configs
 anchors = 200
-num_workers = 8
+num_workers = 2
 epoch_start = 0
-checkpoint = "output/AppleMOTS/MOT/det/frcnn/train/24.04.15.12.00/ResNet50FPN_weights/model_epoch_200.pt"
+# checkpoint = "output/AppleMOTS/MOT/det/frcnn/train/24.04.15.12.00/ResNet50FPN_weights/model_epoch_200.pt"
+checkpoint = ""
 epochs = 50
 batch_size = 16
 backbone = "ResNet50FPN"  # 'ResNet50FPN' 'ResNet101FPN'

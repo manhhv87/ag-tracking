@@ -34,7 +34,7 @@ yolo_data = "config/lettuce_coco.yaml"  # TBD # "yolov8n.pt"
 
 ## Det Train FasterRCNN Configs
 anchors = 200
-num_workers = 8
+num_workers = 2
 epoch_start = 0
 checkpoint = "output/LettuceMOT/det/frcnn/train/24.03.15.12.00/ResNet50FPN_weights/model_epoch_200.pt"
 epochs = 1
