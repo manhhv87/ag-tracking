@@ -5,7 +5,15 @@ import numpy as np
 import copy
 import time
 import torch
-import torch._six
+
+try:
+    import torch._six as _six  # PyTorch <= 1.9
+except Exception:
+
+    class _six:
+        string_classes = (str,)
+        int_classes = (int,)
+
 
 from pycocotools.cocoeval import COCOeval
 from pycocotools.coco import COCO
@@ -130,7 +138,7 @@ class CocoEvaluator(object):
                 continue
 
             boxes = prediction["boxes"]
-            boxes = convert_to_xywh(boxes).tolist()     # COCO expects xywh
+            boxes = convert_to_xywh(boxes).tolist()  # COCO expects xywh
             scores = prediction["scores"].tolist()
             labels = prediction["labels"].tolist()
 
@@ -161,7 +169,7 @@ class CocoEvaluator(object):
             labels = prediction["labels"]
             masks = prediction["masks"]
 
-            masks = masks > 0.5     # binarize/threshold mask logits or probabilities
+            masks = masks > 0.5  # binarize/threshold mask logits or probabilities
 
             scores = prediction["scores"].tolist()
             labels = prediction["labels"].tolist()
@@ -343,7 +351,7 @@ def loadRes(self, resFile):
 
     # print('Loading and preparing results...')
     # tic = time.time()
-    if isinstance(resFile, torch._six.string_classes):
+    if isinstance(resFile, _six.string_classes):
         anns = json.load(open(resFile))
     elif type(resFile) == np.ndarray:
         anns = self.loadNumpyAnnotations(resFile)
@@ -437,7 +445,7 @@ def evaluate(self):
         computeIoU = self.computeIoU
     elif p.iouType == "keypoints":
         computeIoU = self.computeOks
-    
+
     # Pre-compute IoUs/OKS for (img,cat) pairs used by evaluateImg
     self.ious = {
         (imgId, catId): computeIoU(imgId, catId)
@@ -455,7 +463,7 @@ def evaluate(self):
         for areaRng in p.areaRng
         for imgId in p.imgIds
     ]
-    
+
     # Shape to (nCats, nAreaRngs, nImgs) for easy concat/merge later
     evalImgs = np.asarray(evalImgs).reshape(len(catIds), len(p.areaRng), len(p.imgIds))
     self._paramsEval = copy.deepcopy(self.params)

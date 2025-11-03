@@ -43,7 +43,7 @@ epoch_start = 0
 # checkpoint = "output/AppleMOTS/MOT/det/frcnn/train/24.04.15.12.00/ResNet50FPN_weights/model_epoch_200.pt"
 checkpoint = ""
 epochs = 50
-batch_size = 16
+batch_size = 4
 backbone = "ResNet50FPN"  # 'ResNet50FPN' 'ResNet101FPN'
 
 # optimizer
