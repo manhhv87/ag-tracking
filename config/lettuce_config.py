@@ -20,8 +20,8 @@ test_set = [seti for i, seti in enumerate(sets) if i in [0, 1, 2, 3, 5]]
 sets = [seti for i, seti in enumerate(sets) if i in [4, 5, 6, 7, 0, 1, 2, 3]]
 
 ## General configs
-task = "track"      # 'play' 'det' 'slam' 'track'
-mode = "eval"       # 'train' 'eval' 'predict'
+task = "det"      # 'play' 'det' 'slam' 'track'
+mode = "train"       # 'train' 'eval' 'predict'
 dectector = "frcnn" # 'frcnn' 'yolov8'
 
 # TODO: change to the tracker names as defined in the paper

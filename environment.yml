@@ -1,0 +1,23 @@
+name: agt
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10.11
+  - pip
+  - numpy=1.26.*
+  - scipy=1.10.1
+  - pillow=9.4.0
+  - tabulate=0.9.0
+
+  - pip:
+      # PyTorch 1.13.1 + CUDA 11.7 wheels
+      - --extra-index-url https://download.pytorch.org/whl/cu117
+      - torch==1.13.1
+      - torchvision==0.14.1
+      - torchaudio==0.13.1
+
+      # Other package (pip)
+      - kornia==0.6.10
+      - opencv-python==4.7.0.72
+      - PyYAML==6.0
+      - ultralytics==8.2.6
