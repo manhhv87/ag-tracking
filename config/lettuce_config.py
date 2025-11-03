@@ -6,10 +6,10 @@ outdir = "output/LettuceMOT/"
 
 # All possible datasets (8)
 sets = [
-    "BF1",
-    "BF2",
-    "OI1",
-    "OI2",
+    "B&F1",
+    "B&F2",
+    "O&I1",
+    "O&I2",
     "straight1",
     "straight2",
     "straight3",
