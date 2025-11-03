@@ -7,42 +7,69 @@ from scipy.optimize import linear_sum_assignment
 from torchreid import metrics
 from torchvision.ops.boxes import clip_boxes_to_image, nms
 
-from .utils import (bbox_overlaps, get_center, get_height, get_width, make_pos,
-                    warp_pos)
+from .utils import bbox_overlaps, get_center, get_height, get_width, make_pos, warp_pos
 
 
 class Tracker:
-    """The main tracking file, here is where magic happens."""
+    """
+    Multi-object tracker following a Tracktor-style tracking-by-detection paradigm,
+    with two stabilizers that echo the paper's global-motion handling:
+      1) ECC-based image alignment (`align`) to compensate camera/platform motion.
+      2) A simple linear motion model (`motion`) using last-N positions.
+
+    Per-frame pipeline:
+      • (Optional) Align previous-frame boxes to current frame with ECC (homography-like warp).
+      • (Optional) Extrapolate boxes via linear motion (center-only or full box).
+      • Regress active tracks' boxes on the current frame; drop tracks under keep-alive score.
+      • NMS among regressed tracks (remove overlaps).
+      • Gate detections by score + NMS; then suppress detections already covered by tracks
+        by giving track boxes a score > 1 so they win the NMS tie-break.
+      • ReID: match remaining detections to INACTIVE tracks using appearance distance
+        (Hungarian assignment), optionally gated by IoU.
+      • Create new tracks from any detections not consumed by ReID.
+      • Record per-id results and manage inactive pool with patience + sanity checks.
+
+    Notes vs. the paper:
+      • The paper's Spatial Association Module (LoFTR-based) estimates global motion and
+        provides robust correspondence for association. Here, ECC alignment plus a ReID
+        appearance module serve a similar purpose of stabilizing association and re-entry.
+    """
+
     # only track pedestrian
     cl = 1
 
     def __init__(self, obj_detect, reid_network, tracker_cfg):
+        # Detector head and ReID embedding extractor; thresholds & options from dict cfg.
         self.obj_detect = obj_detect
         self.reid_network = reid_network
-        self.detection_person_thresh = tracker_cfg['detection_person_thresh']
-        self.regression_person_thresh = tracker_cfg['regression_person_thresh']
-        self.detection_nms_thresh = tracker_cfg['detection_nms_thresh']
-        self.regression_nms_thresh = tracker_cfg['regression_nms_thresh']
-        self.public_detections = tracker_cfg['public_detections']
-        self.inactive_patience = tracker_cfg['inactive_patience']
-        self.do_reid = tracker_cfg['do_reid']
-        self.max_features_num = tracker_cfg['max_features_num']
-        self.reid_sim_threshold = tracker_cfg['reid_sim_threshold']
-        self.reid_iou_threshold = tracker_cfg['reid_iou_threshold']
-        self.do_align = tracker_cfg['do_align']
-        self.motion_model_cfg = tracker_cfg['motion_model']
+        self.detection_person_thresh = tracker_cfg["detection_person_thresh"]   # ~ s_new
+        self.regression_person_thresh = tracker_cfg["regression_person_thresh"] # ~ s_active
+        self.detection_nms_thresh = tracker_cfg["detection_nms_thresh"]         # λ_nms (dets)
+        self.regression_nms_thresh = tracker_cfg["regression_nms_thresh"]       # λ_nms (tracks)
+        self.public_detections = tracker_cfg["public_detections"]
+        self.inactive_patience = tracker_cfg["inactive_patience"]
+        self.do_reid = tracker_cfg["do_reid"]
+        self.max_features_num = tracker_cfg["max_features_num"]
+        self.reid_sim_threshold = tracker_cfg["reid_sim_threshold"]
+        self.reid_iou_threshold = tracker_cfg["reid_iou_threshold"]
+        self.do_align = tracker_cfg["do_align"]
+        self.motion_model_cfg = tracker_cfg["motion_model"]
 
-        self.warp_mode = getattr(cv2, tracker_cfg['warp_mode'])
-        self.number_of_iterations = tracker_cfg['number_of_iterations']
-        self.termination_eps = tracker_cfg['termination_eps']
+        # ECC warp configuration (OpenCV findTransformECC)
+        self.warp_mode = getattr(cv2, tracker_cfg["warp_mode"])
+        self.number_of_iterations = tracker_cfg["number_of_iterations"]
+        self.termination_eps = tracker_cfg["termination_eps"]
 
+        # Internal state
         self.tracks = []
         self.inactive_tracks = []
         self.track_num = 0
         self.im_index = 0
+        # results[track_id][frame_idx] = [x1,y1,x2,y2,score]
         self.results = {}
 
     def reset(self, hard=True):
+        """Reset tracker state; if hard=True also reset counters and stored results."""
         self.tracks = []
         self.inactive_tracks = []
 
@@ -52,49 +79,69 @@ class Tracker:
             self.im_index = 0
 
     def tracks_to_inactive(self, tracks):
+        """
+        Move given tracks from active to inactive, freezing their last confident position.
+        Preserves state for possible ReID-based re-activation later on.
+        """
         self.tracks = [t for t in self.tracks if t not in tracks]
         for t in tracks:
             t.pos = t.last_pos[-1]
         self.inactive_tracks += tracks
 
     def add(self, new_det_pos, new_det_scores, new_det_features):
-        """Initializes new Track objects and saves them."""
+        """Initialize new Track objects and append them to active tracks."""
         num_new = new_det_pos.size(0)
         for i in range(num_new):
-            self.tracks.append(Track(
-                new_det_pos[i].view(1, -1),
-                new_det_scores[i],
-                self.track_num + i,
-                new_det_features[i].view(1, -1),
-                self.inactive_patience,
-                self.max_features_num,
-                self.motion_model_cfg['n_steps'] if self.motion_model_cfg['n_steps'] > 0 else 1
-            ))
+            self.tracks.append(
+                Track(
+                    new_det_pos[i].view(1, -1),
+                    new_det_scores[i],
+                    self.track_num + i,
+                    new_det_features[i].view(1, -1),
+                    self.inactive_patience,
+                    self.max_features_num,
+                    (
+                        self.motion_model_cfg["n_steps"]
+                        if self.motion_model_cfg["n_steps"] > 0
+                        else 1
+                    ),
+                )
+            )
         self.track_num += num_new
 
     def regress_tracks(self, blob):
-        """Regress the position of the tracks and also checks their scores."""
+        """
+        Regress active tracks via the detector head and check keep-alive scores.
+        Tracks with scores <= REGRESSION threshold are deactivated.
+
+        Returns:
+            torch.Tensor (CUDA): scores of surviving regressed tracks, in the order
+            expected by downstream NMS.
+        """
         pos = self.get_pos()
 
-        # regress
+        # Predict updated boxes/scores for current frame; clip to image size.
         boxes, scores = self.obj_detect.predict_boxes(pos)
-        pos = clip_boxes_to_image(boxes, blob['img'].shape[-2:])
+        pos = clip_boxes_to_image(boxes, blob["img"].shape[-2:])
 
         s = []
+        # Reverse iteration allows safe removal while updating in place.
         for i in range(len(self.tracks) - 1, -1, -1):
             t = self.tracks[i]
             t.score = scores[i]
             if scores[i] <= self.regression_person_thresh:
+                # Below keep-alive -> move to inactive pool
                 self.tracks_to_inactive([t])
             else:
                 s.append(scores[i])
+                # Keep the regressed, clipped box for this track
                 # t.prev_pos = t.pos
                 t.pos = pos[i].view(1, -1)
 
         return torch.Tensor(s[::-1]).cuda()
 
     def get_pos(self):
-        """Get the positions of all active tracks."""
+        """Get stacked positions of all active tracks as a Tensor[M,4] (may be empty)."""
         if len(self.tracks) == 1:
             pos = self.tracks[0].pos
         elif len(self.tracks) > 1:
@@ -104,7 +151,7 @@ class Tracker:
         return pos
 
     def get_features(self):
-        """Get the features of all active tracks."""
+        """Get stacked appearance features of all active tracks (may be empty)."""
         if len(self.tracks) == 1:
             features = self.tracks[0].features
         elif len(self.tracks) > 1:
@@ -114,7 +161,7 @@ class Tracker:
         return features
 
     def get_inactive_features(self):
-        """Get the features of all inactive tracks."""
+        """Get stacked appearance features of all inactive tracks (may be empty)."""
         if len(self.inactive_tracks) == 1:
             features = self.inactive_tracks[0].features
         elif len(self.inactive_tracks) > 1:
@@ -124,19 +171,36 @@ class Tracker:
         return features
 
     def reid(self, blob, new_det_pos, new_det_scores):
-        """Tries to ReID inactive tracks with new detections."""
+        """
+        Try to re-identify INACTIVE tracks with current detections using appearance
+        features (computed from crops via `reid_network`) and Hungarian assignment.
+        Optionally gate candidate pairs by IoU to avoid implausible matches.
+
+        Returns:
+            Tuple of (new_det_pos, new_det_scores, new_det_features) possibly reduced
+            after successful assignments (re-activations).
+        """
         new_det_features = [torch.zeros(0).cuda() for _ in range(len(new_det_pos))]
 
         if self.do_reid:
+            # Compute appearance embeddings for candidate detections
             new_det_features = self.get_appearances(blob, new_det_pos)
 
             if len(self.inactive_tracks) >= 1:
-                # calculate appearance distances
+                # Build distance matrix: rows=inactive tracks, cols=detections
                 dist_mat, pos = [], []
                 for t in self.inactive_tracks:
-                    dist_mat.append(torch.cat([t.test_features(feat.view(1, -1))
-                                               for feat in new_det_features], dim=1))
+                    dist_mat.append(
+                        torch.cat(
+                            [
+                                t.test_features(feat.view(1, -1))
+                                for feat in new_det_features
+                            ],
+                            dim=1,
+                        )
+                    )
                     pos.append(t.pos)
+
                 if len(dist_mat) > 1:
                     dist_mat = torch.cat(dist_mat, 0)
                     pos = torch.cat(pos, 0)
@@ -144,7 +208,7 @@ class Tracker:
                     dist_mat = dist_mat[0]
                     pos = pos[0]
 
-                # calculate IoU distances
+                # Optional IoU gate: heavily penalize pairs with IoU below threshold
                 if self.reid_iou_threshold:
                     iou = bbox_overlaps(pos, new_det_pos)
                     iou_mask = torch.ge(iou, self.reid_iou_threshold)
@@ -153,12 +217,14 @@ class Tracker:
                     dist_mat = dist_mat * iou_mask.float() + iou_neg_mask.float() * 1000
                 dist_mat = dist_mat.cpu().numpy()
 
+                # Hungarian assignment on the distance matrix
                 row_ind, col_ind = linear_sum_assignment(dist_mat)
 
                 assigned = []
                 remove_inactive = []
                 for r, c in zip(row_ind, col_ind):
                     if dist_mat[r, c] <= self.reid_sim_threshold:
+                        # Re-activate the matched inactive track with detection c
                         t = self.inactive_tracks[r]
                         self.tracks.append(t)
                         t.count_inactive = 0
@@ -168,15 +234,25 @@ class Tracker:
                         assigned.append(c)
                         remove_inactive.append(t)
 
+                # Remove re-activated tracks from inactive pool
                 for t in remove_inactive:
                     self.inactive_tracks.remove(t)
 
-                keep = torch.Tensor([i for i in range(new_det_pos.size(0)) if i not in assigned]).long().cuda()
+                # Keep only detections not consumed by re-activation
+                keep = (
+                    torch.Tensor(
+                        [i for i in range(new_det_pos.size(0)) if i not in assigned]
+                    )
+                    .long()
+                    .cuda()
+                )
+
                 if keep.nelement() > 0:
                     new_det_pos = new_det_pos[keep]
                     new_det_scores = new_det_scores[keep]
                     new_det_features = new_det_features[keep]
                 else:
+                    # All detections matched; return empty sets
                     new_det_pos = torch.zeros(0).cuda()
                     new_det_scores = torch.zeros(0).cuda()
                     new_det_features = torch.zeros(0).cuda()
@@ -184,24 +260,31 @@ class Tracker:
         return new_det_pos, new_det_scores, new_det_features
 
     def get_appearances(self, blob, pos):
-        """Uses the siamese CNN to get the features for all active tracks."""
+        """
+        Compute ReID embeddings for given detection boxes.
+        Here we crop raw image regions and feed them to the provided `reid_network`.
+        """
         crops = []
         for r in pos:
+            # Defensive cropping: avoid zero-width/height slices
             x0 = int(r[0])
             y0 = int(r[1])
             x1 = int(r[2])
             y1 = int(r[3])
+
             if x0 == x1:
                 if x0 != 0:
                     x0 -= 1
                 else:
                     x1 += 1
+
             if y0 == y1:
                 if y0 != 0:
                     y0 -= 1
                 else:
                     y1 += 1
-            crop = blob['img'][0, :, y0:y1, x0:x1].permute(1, 2, 0)
+            
+            crop = blob["img"][0, :, y0:y1, x0:x1].permute(1, 2, 0)
             crops.append(crop.mul(255).numpy().astype(np.uint8))
 
         new_features = self.reid_network(crops)
@@ -209,90 +292,129 @@ class Tracker:
         return new_features
 
     def add_features(self, new_features):
-        """Adds new appearance features to active tracks."""
+        """Append fresh embeddings to each active track's feature queue (with capacity cap)."""
         for t, f in zip(self.tracks, new_features):
             t.add_features(f.view(1, -1))
 
     def align(self, blob):
-        """Aligns the positions of active and inactive tracks depending on camera motion."""
+        """
+        ECC-based global alignment to compensate inter-frame camera motion.
+        Warps positions (active & inactive) and history when the motion model is enabled
+        so that regression/NMS and ReID operate in the current frame's coordinates.
+        """
         if self.im_index > 0:
             im1 = np.transpose(self.last_image.cpu().numpy(), (1, 2, 0))
-            im2 = np.transpose(blob['img'][0].cpu().numpy(), (1, 2, 0))
+            im2 = np.transpose(blob["img"][0].cpu().numpy(), (1, 2, 0))
             im1_gray = cv2.cvtColor(im1, cv2.COLOR_RGB2GRAY)
             im2_gray = cv2.cvtColor(im2, cv2.COLOR_RGB2GRAY)
             warp_matrix = np.eye(2, 3, dtype=np.float32)
-            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, self.number_of_iterations,  self.termination_eps)
-            cc, warp_matrix = cv2.findTransformECC(im1_gray, im2_gray, warp_matrix, self.warp_mode, criteria)
+            criteria = (
+                cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
+                self.number_of_iterations,
+                self.termination_eps,
+            )
+
+            # Estimate 2x3 warp (e.g., affine) that maps last frame to current frame
+            cc, warp_matrix = cv2.findTransformECC(
+                im1_gray, im2_gray, warp_matrix, self.warp_mode, criteria
+            )
             warp_matrix = torch.from_numpy(warp_matrix)
 
+            # Warp current active tracks
             for t in self.tracks:
                 t.pos = warp_pos(t.pos, warp_matrix)
                 # t.pos = clip_boxes(Variable(pos), blob['im_info'][0][:2]).data
 
+            # Warp inactive tracks to keep re-id search consistent in current coords
             if self.do_reid:
                 for t in self.inactive_tracks:
                     t.pos = warp_pos(t.pos, warp_matrix)
 
-            if self.motion_model_cfg['enabled']:
+            # Keep motion history consistent as well
+            if self.motion_model_cfg["enabled"]:
                 for t in self.tracks:
                     for i in range(len(t.last_pos)):
                         t.last_pos[i] = warp_pos(t.last_pos[i], warp_matrix)
 
     def motion_step(self, track):
-        """Updates the given track's position by one step based on track.last_v"""
-        if self.motion_model_cfg['center_only']:
+        """Advance a track one step using last average velocity (center-only or full box)."""
+        if self.motion_model_cfg["center_only"]:
             center_new = get_center(track.pos) + track.last_v
-            track.pos = make_pos(*center_new, get_width(track.pos), get_height(track.pos))
+            track.pos = make_pos(
+                *center_new, get_width(track.pos), get_height(track.pos)
+            )
         else:
             track.pos = track.pos + track.last_v
 
     def motion(self):
-        """Applies a simple linear motion model that considers the last n_steps steps."""
+        """
+        Apply a simple linear motion model using the last n_steps positions.
+        Computes average velocity across consecutive pairs and advances tracks once.
+        """
         for t in self.tracks:
             last_pos = list(t.last_pos)
 
-            # avg velocity between each pair of consecutive positions in t.last_pos
-            if self.motion_model_cfg['center_only']:
-                vs = [get_center(p2) - get_center(p1) for p1, p2 in zip(last_pos, last_pos[1:])]
+            # Average velocity across history window
+            if self.motion_model_cfg["center_only"]:
+                vs = [
+                    get_center(p2) - get_center(p1)
+                    for p1, p2 in zip(last_pos, last_pos[1:])
+                ]
             else:
                 vs = [p2 - p1 for p1, p2 in zip(last_pos, last_pos[1:])]
 
             t.last_v = torch.stack(vs).mean(dim=0)
             self.motion_step(t)
 
+        # Optionally move inactive tracks too (useful for short-term re-entry)
         if self.do_reid:
             for t in self.inactive_tracks:
                 if t.last_v.nelement() > 0:
                     self.motion_step(t)
 
     def step(self, blob):
-        """This function should be called every timestep to perform tracking with a blob
-        containing the image information.
+        """
+        Run one full tracking step given the current frame `blob` (image + optional dets).
+
+        Steps:
+          1) Append current positions to history for motion averaging.
+          2) Collect detections (public or from detector), clip, and threshold by score.
+          3) (Optional) Align and motion-step active tracks; drop degenerate boxes.
+          4) Regress active tracks and prune with keep-alive threshold; NMS overlap pruning.
+          5) NMS on detections; then iteratively suppress dets overlapped by tracks
+             by giving each track an artificial score > 1 in an NMS pass.
+          6) ReID: attempt to re-activate inactive tracks; remaining dets create new tracks.
+          7) Save per-id results, age inactive tracks, prune by patience and positive area.
         """
         for t in self.tracks:
-            # add current position to last_pos list
+            # Maintain short history window (used by motion model & stability)
             t.last_pos.append(t.pos.clone())
 
         ###########################
         # Look for new detections #
         ###########################
 
-        self.obj_detect.load_image(blob['img'])
+        self.obj_detect.load_image(blob["img"])
 
+        # Choose public detections (if provided) or run detector
         if self.public_detections:
-            dets = blob['dets'].squeeze(dim=0)
+            dets = blob["dets"].squeeze(dim=0)
             if dets.nelement() > 0:
                 boxes, scores = self.obj_detect.predict_boxes(dets)
             else:
                 boxes = scores = torch.zeros(0).cuda()
         else:
-            boxes, scores = self.obj_detect.detect(blob['img'])
+            boxes, scores = self.obj_detect.detect(blob["img"])
 
         if boxes.nelement() > 0:
-            boxes = clip_boxes_to_image(boxes, blob['img'].shape[-2:])
+            boxes = clip_boxes_to_image(boxes, blob["img"].shape[-2:])
 
-            # Filter out tracks that have too low person score
-            inds = torch.gt(scores, self.detection_person_thresh).nonzero(as_tuple=False).view(-1)
+            # New-track candidate gate: keep detections above threshold
+            inds = (
+                torch.gt(scores, self.detection_person_thresh)
+                .nonzero(as_tuple=False)
+                .view(-1)
+            )
         else:
             inds = torch.zeros(0).cuda()
 
@@ -309,29 +431,36 @@ class Tracker:
         ##################
 
         if len(self.tracks):
-            # align
+            # 1) Global alignment for camera motion compensation
             if self.do_align:
                 self.align(blob)
 
-            # apply motion model
-            if self.motion_model_cfg['enabled']:
+            # 2) Simple linear motion extrapolation (optional)
+            if self.motion_model_cfg["enabled"]:
                 self.motion()
+                # Drop degenerate boxes after motion
                 self.tracks = [t for t in self.tracks if t.has_positive_area()]
 
-            # regress
+            # 3) Regress track boxes; may deactivate weak tracks
             person_scores = self.regress_tracks(blob)
 
             if len(self.tracks):
-                # create nms input
-
-                # nms here if tracks overlap
+                # NMS among regressed tracks to remove overlapping duplicates
                 keep = nms(self.get_pos(), person_scores, self.regression_nms_thresh)
 
-                self.tracks_to_inactive([self.tracks[i] for i in list(range(len(self.tracks))) if i not in keep])
+                # Move suppressed tracks to inactive
+                self.tracks_to_inactive(
+                    [
+                        self.tracks[i]
+                        for i in list(range(len(self.tracks)))
+                        if i not in keep
+                    ]
+                )
 
+                # Refresh appearance features for survivors
                 if keep.nelement() > 0 and self.do_reid:
-                        new_features = self.get_appearances(blob, self.get_pos())
-                        self.add_features(new_features)
+                    new_features = self.get_appearances(blob, self.get_pos())
+                    self.add_features(new_features)
 
         #####################
         # Create new tracks #
@@ -347,11 +476,12 @@ class Tracker:
             det_pos = det_pos[keep]
             det_scores = det_scores[keep]
 
-            # check with every track in a single run (problem if tracks delete each other)
+            # Iterate over tracks; prune any remaining overlapped detections
             for t in self.tracks:
                 nms_track_pos = torch.cat([t.pos, det_pos])
                 nms_track_scores = torch.cat(
-                    [torch.tensor([2.0]).to(det_scores.device), det_scores])
+                    [torch.tensor([2.0]).to(det_scores.device), det_scores]
+                )
                 keep = nms(nms_track_pos, nms_track_scores, self.detection_nms_thresh)
 
                 keep = keep[torch.ge(keep, 1)] - 1
@@ -365,10 +495,12 @@ class Tracker:
             new_det_pos = det_pos
             new_det_scores = det_scores
 
-            # try to reidentify tracks
-            new_det_pos, new_det_scores, new_det_features = self.reid(blob, new_det_pos, new_det_scores)
+            # Try to re-identify inactive tracks first (Hungarian over appearance dist)
+            new_det_pos, new_det_scores, new_det_features = self.reid(
+                blob, new_det_pos, new_det_scores
+            )
 
-            # add new
+            # Remaining detections spawn new tracks
             if new_det_pos.nelement() > 0:
                 self.add(new_det_pos, new_det_scores, new_det_features)
 
@@ -376,63 +508,89 @@ class Tracker:
         # Generate Results #
         ####################
 
+        # Save per-id, per-frame results as [x1,y1,x2,y2,score]
         for t in self.tracks:
             if t.id not in self.results.keys():
                 self.results[t.id] = {}
-            self.results[t.id][self.im_index] = np.concatenate([
-                t.pos[0].cpu().numpy(),
-                np.array([t.score.cpu()])])
+            self.results[t.id][self.im_index] = np.concatenate(
+                [t.pos[0].cpu().numpy(), np.array([t.score.cpu()])]
+            )
 
+        # Age inactive tracks; prune if degenerate or over patience
         for t in self.inactive_tracks:
             t.count_inactive += 1
 
         self.inactive_tracks = [
-            t for t in self.inactive_tracks if t.has_positive_area() and t.count_inactive <= self.inactive_patience
+            t
+            for t in self.inactive_tracks
+            if t.has_positive_area() and t.count_inactive <= self.inactive_patience
         ]
 
+        # Advance frame index and store last image for ECC alignment
         self.im_index += 1
-        self.last_image = blob['img'][0]
+        self.last_image = blob["img"][0]
 
     def get_results(self):
+        """Return the nested dict: results[track_id][frame_idx] -> np.ndarray(5,)."""
         return self.results
 
 
 class Track(object):
-    """This class contains all necessary for every individual track."""
+    """
+    Container for a single track's state: geometry, score, short motion history,
+    and a queue of appearance embeddings for robust ReID.
+    """
 
-    def __init__(self, pos, score, track_id, features, inactive_patience, max_features_num, mm_steps):
+    def __init__(
+        self,
+        pos,
+        score,
+        track_id,
+        features,
+        inactive_patience,
+        max_features_num,
+        mm_steps,
+    ):
         self.id = track_id
         self.pos = pos
         self.score = score
+        # FIFO queue of per-frame embeddings; averaged at test-time for matching
         self.features = deque([features])
         self.ims = deque([])
         self.count_inactive = 0
         self.inactive_patience = inactive_patience
         self.max_features_num = max_features_num
+        # Keep last (mm_steps + 1) positions to estimate average velocity
         self.last_pos = deque([pos.clone()], maxlen=mm_steps + 1)
         self.last_v = torch.Tensor([])
         self.gt_id = None
 
     def has_positive_area(self):
+        """Reject boxes with non-positive area (degenerate after warp/motion)."""
         return self.pos[0, 2] > self.pos[0, 0] and self.pos[0, 3] > self.pos[0, 1]
 
     def add_features(self, features):
-        """Adds new appearance features to the object."""
+        """Add a new embedding to the queue, pruning the oldest if over capacity."""
         self.features.append(features)
         if len(self.features) > self.max_features_num:
             self.features.popleft()
 
     def test_features(self, test_features):
-        """Compares test_features to features of this Track object"""
+        """
+        Compute appearance distance between this track (mean-pooled features)
+        and the given test feature(s). Lower distance = better match.
+        """
         if len(self.features) > 1:
             features = torch.cat(list(self.features), dim=0)
         else:
             features = self.features[0]
+
         features = features.mean(0, keepdim=True)
         dist = metrics.compute_distance_matrix(features, test_features)
         # dist = F.pairwise_distance(features, test_features, keepdim=True)
         return dist
 
     def reset_last_pos(self):
+        """Reset short motion history to the current position (after re-activation)."""
         self.last_pos.clear()
         self.last_pos.append(self.pos.clone())

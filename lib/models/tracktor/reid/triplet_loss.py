@@ -5,13 +5,14 @@
 ##############
 # At the moment both batch_all and batch_hard seem to pass the error testing from the source
 # mentioned above, but in practice for my experiments batch_hard converged to margin and
-# batch_all the error exploded. So for me both are not functional at the moment, but 
+# batch_all the error exploded. So for me both are not functional at the moment, but
 # _get_triplet_mask can be used to get all valid triplets and then F.triplet_margin_loss()
 # can be used to get them running. See resnet.py for how the losses are implemented in this
 # project.
 
 import torch
 from torch.autograd import Variable
+
 
 def _pairwise_distances(embeddings, squared=False):
     """Compute the 2D matrix of distances between all the embeddings.
@@ -37,7 +38,11 @@ def _pairwise_distances(embeddings, squared=False):
     # Compute the pairwise distance matrix as we have:
     # ||a - b||^2 = ||a||^2  - 2 <a, b> + ||b||^2
     # shape (batch_size, batch_size)
-    distances = torch.unsqueeze(square_norm, 0) - 2.0 * dot_product + torch.unsqueeze(square_norm, 1)
+    distances = (
+        torch.unsqueeze(square_norm, 0)
+        - 2.0 * dot_product
+        + torch.unsqueeze(square_norm, 1)
+    )
 
     # Because of computation errors, some distances might be negative so we put everything >= 0.0
     distances = torch.clamp(distances, min=0.0)
@@ -55,6 +60,7 @@ def _pairwise_distances(embeddings, squared=False):
         distances = distances * (1.0 - mask)
 
     return distances
+
 
 def _get_anchor_positive_triplet_mask(labels):
     """Return a 2D mask where mask[a, p] is True iff a and p are distinct and have same label.
@@ -114,10 +120,9 @@ def _get_triplet_mask(labels):
 
     distinct_indices = (i_not_equal_j & i_not_equal_k) & j_not_equal_k
 
-
     # Check if labels[i] == labels[j] and labels[i] != labels[k]
     label_equal = torch.eq(torch.unsqueeze(labels, 0), torch.unsqueeze(labels, 1))
-    #if labels.is_cuda:
+    # if labels.is_cuda:
     #    label_equal = label_equal.cuda()
     i_equal_j = torch.unsqueeze(label_equal, 2)
     i_equal_k = torch.unsqueeze(label_equal, 1)
@@ -128,6 +133,7 @@ def _get_triplet_mask(labels):
     mask = distinct_indices & valid_labels
 
     return mask
+
 
 def batch_all_triplet_loss(labels, embeddings, margin, squared=False):
     """Build the triplet loss over a batch of embeddings.
@@ -176,6 +182,7 @@ def batch_all_triplet_loss(labels, embeddings, margin, squared=False):
 
     return triplet_loss, fraction_positive_triplets
 
+
 def batch_hard_triplet_loss(labels, embeddings, margin, squared=False):
     """Build the triplet loss over a batch of embeddings.
 
@@ -212,13 +219,17 @@ def batch_hard_triplet_loss(labels, embeddings, margin, squared=False):
 
     # We add the maximum value in each row to the invalid negatives (label(a) == label(n))
     max_anchor_negative_dist, _ = torch.max(pairwise_dist, dim=1, keepdim=True)
-    anchor_negative_dist = pairwise_dist + max_anchor_negative_dist * (1.0 - mask_anchor_negative)
+    anchor_negative_dist = pairwise_dist + max_anchor_negative_dist * (
+        1.0 - mask_anchor_negative
+    )
 
     # shape (batch_size,)
     hardest_negative_dist, _ = torch.min(anchor_negative_dist, dim=1, keepdim=True)
 
     # Combine biggest d(a, p) and smallest d(a, n) into final triplet loss
-    triplet_loss = torch.clamp(hardest_positive_dist - hardest_negative_dist + margin, min=0.0)
+    triplet_loss = torch.clamp(
+        hardest_positive_dist - hardest_negative_dist + margin, min=0.0
+    )
 
     # Get final mean triplet loss
     triplet_loss = triplet_loss.mean()

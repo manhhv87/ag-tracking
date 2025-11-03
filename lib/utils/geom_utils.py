@@ -1,5 +1,6 @@
 import numpy as np
 
+
 def estimate_euclidean_transform(keypoints1, keypoints2):
     """
     Estimate Euclidean transformation given 2D keypoint correspondences using least squares method.
@@ -15,7 +16,9 @@ def estimate_euclidean_transform(keypoints1, keypoints2):
         t (ndarray): Array of shape (2,) representing the estimated translation vector.
     """
     # Check if the number of keypoints is the same in both images
-    assert keypoints1.shape[0] == keypoints2.shape[0], "Number of keypoints must be the same in both images"
+    assert (
+        keypoints1.shape[0] == keypoints2.shape[0]
+    ), "Number of keypoints must be the same in both images"
 
     # Find the centroids of the keypoints
     centroid1 = np.mean(keypoints1, axis=0)
