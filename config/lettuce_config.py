@@ -38,7 +38,7 @@ num_workers = 2
 epoch_start = 0
 # checkpoint = "output/LettuceMOT/det/frcnn/train/24.03.15.12.00/ResNet50FPN_weights/model_epoch_200.pt"
 checkpoint = ""
-epochs = 1
+epochs = 50
 batch_size = 16
 backbone = "ResNet50FPN"  # 'ResNet50FPN' 'ResNet101FPN'
 
